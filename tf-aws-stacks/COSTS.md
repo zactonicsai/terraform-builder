@@ -75,6 +75,25 @@ are the biggest line item below.
 
 ---
 
+## Optional Stack 4: `04-database-restore`
+
+| Resource | Terraform type | Count | Unit price | Monthly |
+|---|---|---|---|---|
+| Snapshot lookup | `data.aws_db_snapshot` | reads | free | $0.00 |
+| Random password | `random_password` | 1 | free (local only) | $0.00 |
+| DB subnet group | `aws_db_subnet_group` | 1 | free | $0.00 |
+| Restored RDS PostgreSQL, db.t3.micro | `aws_db_instance` | 1 | $0.018 / hour | $13.14 |
+| Restored storage, 20 GB (size comes from the snapshot) | (same resource) | 20 GB | $0.115 / GB-month | $2.30 |
+| New secret | `aws_secretsmanager_secret` | 1 | $0.40 / secret-month | $0.40 |
+| Manual snapshot `demo-db-snap-1` (made with the CLI, kept until you delete it) | outside Terraform | ~1 GB actual data | $0.095 / GB-month | ~$0.10 |
+| **Stack 4 total** | | | | **≈ $15.94** (+ the snapshot while it exists) |
+
+> This is a second full database, so it roughly doubles Stack 2. Free Tier covers only 750
+> db.t3.micro hours total, so running two databases exceeds it. Manual snapshots are billed on
+> actual data used, not the 20 GB allocated, and they are **not** deleted by `terraform destroy`.
+
+---
+
 ## Grand Total
 
 | | Monthly | Hourly (useful for short practice sessions) |
@@ -83,6 +102,7 @@ are the biggest line item below.
 | Stack 2 database | $15.84 | $0.022 |
 | Stack 3 compute | $16.46 | $0.023 |
 | **All three, no Free Tier** | **≈ $90.70** | **≈ $0.125** |
+| Optional Stack 4 restore, while it exists | +$15.94 | +$0.022 |
 | **All three, classic Free Tier** | **≈ $59.50** | **≈ $0.082** |
 | Network with only the `secretsmanager` endpoint, Free Tier | ≈ $15.60 | ≈ $0.021 |
 

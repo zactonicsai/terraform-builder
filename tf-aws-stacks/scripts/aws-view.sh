@@ -20,9 +20,11 @@ echo "=== Security Groups ==="
 aws ec2 describe-security-groups --filters "Name=tag:Project,Values=$P" \
   --query 'SecurityGroups[].{Id:GroupId,Name:GroupName}' --output table
 echo "=== Secret ==="
-aws secretsmanager describe-secret --secret-id "$P/db-credentials" --query '{Name:Name,Arn:ARN}' --output table 2>/dev/null || echo "(none)"
+aws secretsmanager list-secrets --query "SecretList[?starts_with(Name, '$P/')].{Name:Name,Arn:ARN}" --output table
 echo "=== RDS ==="
 aws rds describe-db-instances --query "DBInstances[?contains(DBInstanceIdentifier, '$P')].{Id:DBInstanceIdentifier,Engine:Engine,Ver:EngineVersion,Status:DBInstanceStatus,Endpoint:Endpoint.Address}" --output table
+echo "=== RDS Snapshots ==="
+aws rds describe-db-snapshots --query "DBSnapshots[?contains(DBInstanceIdentifier, '$P')].{Snapshot:DBSnapshotIdentifier,Of:DBInstanceIdentifier,Status:Status,Created:SnapshotCreateTime}" --output table
 echo "=== IAM ==="
 aws iam list-instance-profiles --query "InstanceProfiles[?contains(InstanceProfileName, '$P')].{Profile:InstanceProfileName,Role:Roles[0].RoleName}" --output table
 echo "=== Launch Templates ==="

@@ -18,9 +18,10 @@
 10. [Line-by-Line: Stack 2, Database](#10-line-by-line-stack-2-database)
 11. [Line-by-Line: Stack 3, Compute](#11-line-by-line-stack-3-compute)
 12. [Line-by-Line: The Website Script](#12-line-by-line-the-website-script)
-13. [Backup AWS CLI Commands](#13-backup-aws-cli-commands)
-14. [Best Practices, Pros and Cons](#14-best-practices-pros-and-cons)
-15. [Quiz Answer Key](#15-quiz-answer-key)
+13. [Optional Stack 4: Restore a Database from a Snapshot](#13-optional-stack-4-restore-a-database-from-a-snapshot)
+14. [Backup AWS CLI Commands](#14-backup-aws-cli-commands)
+15. [Best Practices, Pros and Cons](#15-best-practices-pros-and-cons)
+16. [Quiz Answer Key](#16-quiz-answer-key)
 
 ---
 
@@ -224,9 +225,9 @@ cd 02-database && terraform destroy && cd ..
 cd 01-network  && terraform destroy && cd ..
 ```
 
-> **Cost note:** the four interface endpoints cost roughly $0.01 per hour each (about $29 per
-> month for all four). RDS db.t3.micro and t3.micro EC2 are Free-Tier eligible for new accounts.
-> Do not leave this running for weeks.
+> **Cost note:** the four interface endpoints are placed in both AZs, so they cost about $0.08
+> per hour together (about $58 per month). RDS db.t3.micro and t3.micro EC2 are Free-Tier
+> eligible. See `COSTS.md` for a resource-by-resource breakdown. Do not leave this running for weeks.
 
 ---
 
@@ -300,6 +301,7 @@ tf-aws-stacks/
 ├── modules/                    # reusable bricks
 │   ├── vpc/                    # VPC, subnets, route table, endpoints
 │   ├── rds/                    # secret, app SG, db SG, subnet group, PostgreSQL
+│   ├── rds_from_snapshot/      # restore a DB from a snapshot, new random password in Secrets Manager
 │   ├── launch_template/        # IAM role, launch template, user_data.sh.tpl
 │   ├── asg/                    # auto scaling group
 │   └── ec2/                    # one instance from the template
@@ -310,9 +312,11 @@ tf-aws-stacks/
 ├── 03-compute/                 # STACK 3  (own state)
 │   ├── versions.tf  variables.tf  data.tf  main.tf  outputs.tf  terraform.tfvars
 │   └── custom_user_data.sh.tpl # example first-boot override
+├── 04-database-restore/        # STACK 4, optional: new DB from a snapshot + new password
 ├── scripts/
 │   ├── aws-view.sh             # CLI: see everything
 │   └── aws-destroy.sh          # CLI: emergency teardown
+├── COSTS.md                    # price of every resource
 └── TUTORIAL.md
 ```
 
@@ -852,7 +856,139 @@ A systemd service so the app starts at boot and restarts if it crashes.
 
 ---
 
-## 13. Backup AWS CLI Commands
+## 13. Optional Stack 4: Restore a Database from a Snapshot
+
+A **snapshot** is a frozen photo of your database at one moment. Restoring from it gives you a
+brand-new database with all the same tables and rows. This is how you clone a database for
+testing, recover from a mistake, or move to a bigger server.
+
+The `rds_from_snapshot` module does three things:
+
+1. Finds the snapshot (an exact name you give, or the newest one for a source database).
+2. Restores it as a new RDS instance and **resets the master password** to a fresh random one.
+3. Stores that new password (plus host, port, username) in a new Secrets Manager secret.
+
+### Step 1: Make a snapshot of demo-db
+
+RDS makes automated snapshots daily, but for the tutorial make one now:
+
+```bash
+aws rds create-db-snapshot --db-instance-identifier demo-db --db-snapshot-identifier demo-db-snap-1
+aws rds wait db-snapshot-available --db-snapshot-identifier demo-db-snap-1   # 2 to 5 minutes
+```
+
+Tip: add a few notes in the website first so you can prove they come back.
+
+### Step 2: Apply Stack 4
+
+```bash
+cd 04-database-restore
+terraform init          # downloads the aws AND random providers
+terraform plan          # shows snapshot_used = demo-db-snap-1
+terraform apply         # 8 to 12 minutes
+```
+
+### Step 3: Read the new password and check the data
+
+```bash
+aws secretsmanager get-secret-value --secret-id demo/demo-db-restored-credentials \
+  --query SecretString --output text
+# {"username":"rcadmin","password":"<20 random chars>","host":"demo-db-restored....","port":5432,...}
+```
+
+Log in to the app server with Session Manager (section 4) and:
+
+```bash
+sudo dnf install -y postgresql17
+S=$(aws secretsmanager get-secret-value --secret-id demo/demo-db-restored-credentials --region us-east-1 --query SecretString --output text)
+export PGPASSWORD=$(echo "$S" | python3 -c 'import sys,json;print(json.load(sys.stdin)["password"])')
+psql -h $(echo "$S" | python3 -c 'import sys,json;print(json.load(sys.stdin)["host"])') -U rcadmin -d appdb -c 'SELECT * FROM notes;'
+```
+
+Your notes are there, and the **old** password `changeme` no longer works on the restored copy.
+
+### Step 4: Destroy when done
+
+```bash
+terraform destroy          # in 04-database-restore
+aws rds delete-db-snapshot --db-snapshot-identifier demo-db-snap-1   # snapshots cost storage
+```
+
+### Line-by-line: modules/rds_from_snapshot/main.tf
+
+```hcl
+data "aws_db_snapshot" "latest" {
+  count                  = var.snapshot_identifier == "" ? 1 : 0
+  db_instance_identifier = var.source_db_identifier
+  most_recent            = true
+}
+```
+A data lookup with `count = 1` or `0`: it only runs if you did **not** name an exact snapshot.
+`most_recent = true` picks the newest snapshot of the source database.
+
+```hcl
+locals {
+  snapshot_id = var.snapshot_identifier != "" ? var.snapshot_identifier : data.aws_db_snapshot.latest[0].id
+  secret_name = var.secret_name != "" ? var.secret_name : "${var.name}/${var.identifier}-credentials"
+}
+```
+Decide which snapshot and which secret name to use. `[0]` reaches into the counted data source.
+
+```hcl
+resource "random_password" "db" {
+  length           = var.password_length
+  special          = true
+  override_special = "!#$%^&*()-_=+"
+}
+```
+The `random` provider invents a password. `override_special` limits punctuation to characters RDS
+accepts (it rejects `/`, `@`, `"` and spaces). The value is saved in state so it does not change
+on every apply.
+
+```hcl
+resource "aws_db_instance" "restored" {
+  identifier          = var.identifier
+  snapshot_identifier = local.snapshot_id
+  instance_class      = var.instance_class
+  password            = random_password.db.result
+  ...
+}
+```
+`snapshot_identifier` is the magic line: instead of creating an empty database, RDS restores this
+snapshot. Engine, version, `db_name`, storage size and the master **username** are locked to
+whatever the snapshot had; you cannot set them here. The **password** is the one thing you may
+reset, which is why we can hand it the new random one.
+
+```hcl
+resource "aws_secretsmanager_secret_version" "db" {
+  secret_string = jsonencode({
+    username = aws_db_instance.restored.username   # read back from the snapshot
+    password = random_password.db.result
+    host     = aws_db_instance.restored.address
+    port     = aws_db_instance.restored.port
+    dbname   = aws_db_instance.restored.db_name
+    engine   = aws_db_instance.restored.engine
+  })
+}
+```
+Write everything an app needs into the new secret. The username is read *from the restored
+instance* because we never typed it; it came with the snapshot.
+
+### 04-database-restore/data.tf
+
+Looks up the VPC, the `Tier = db` subnets, and Stack 2's `demo-db-sg`. Reusing the DB security
+group means the same app servers are allowed to connect to the copy.
+
+### Quiz 10
+
+1. Name three things about a restored database that you cannot change because they come from the snapshot.
+2. What is the one credential you *can* change on restore?
+3. Which setting makes Terraform pick the newest snapshot automatically?
+4. Which extra provider does this module need, and how do you get it?
+
+---
+
+## 14. Backup AWS CLI Commands
 
 Terraform is the normal way to view and destroy. If a state file is lost, these still work
 because they search by the `Project` tag or by name.
@@ -883,20 +1019,29 @@ Deletes in reverse stack order: ASG → instances → launch template → IAM �
 secret → VPC endpoints → security groups → subnets → route table → VPC. It waits for endpoint
 network cards to release before deleting security groups, which is the usual sticking point.
 
-**Prefer `terraform destroy` in 03, then 02, then 01.**
+Snapshot commands:
 
-### Quiz 10
+```bash
+aws rds describe-db-snapshots --db-instance-identifier demo-db --query 'DBSnapshots[].[DBSnapshotIdentifier,Status,SnapshotCreateTime]' --output table
+aws rds delete-db-snapshot --db-snapshot-identifier demo-db-snap-1
+aws rds delete-db-instance --db-instance-identifier demo-db-restored --skip-final-snapshot
+aws secretsmanager delete-secret --secret-id demo/demo-db-restored-credentials --force-delete-without-recovery
+```
+
+**Prefer `terraform destroy` in 04 (if used), 03, then 02, then 01.**
+
+### Quiz 11
 
 1. Why must VPC endpoints be deleted before the security groups?
 
 ---
 
-## 14. Best Practices, Pros and Cons
+## 15. Best Practices, Pros and Cons
 
 | Choice | Pro | Con | When to change |
 |---|---|---|---|
 | **No internet gateway** | Nothing can reach the servers from outside; nothing leaks out | Needs endpoints ($) and Session Manager to use it | Add an IGW + ALB in public subnets if the site must be public |
-| **VPC endpoints** | Private path to AWS APIs and packages | ~$7/month each interface endpoint | Drop the `ssm*` three if you never need a shell |
+| **VPC endpoints** | Private path to AWS APIs and packages | ~$14.60/month per interface endpoint across two AZs (see `COSTS.md`) | Drop the `ssm*` three if you never need a shell |
 | **Three stacks** | Small blast radius, clear ownership | More commands, ordering matters | Merge if one person owns everything and it is small |
 | **Tag/name lookups** between stacks | No shared state; each stack is self-contained | Renaming breaks lookups | `terraform_remote_state` with an S3 backend is the alternative |
 | **Password in Secrets Manager** | One source of truth; app reads it with a badge | The password is also in tfvars/state | Use `manage_master_user_password = true` and let RDS generate it |
@@ -912,7 +1057,7 @@ before `apply`.
 
 ---
 
-## 15. Quiz Answer Key
+## 16. Quiz Answer Key
 
 **Quiz 1:** 1) Apply 01 → 02 → 03; destroy 03 → 02 → 01. 2) `data` blocks look up the VPC by its `Name` tag and subnets by their `Tier` tag.
 
@@ -932,4 +1077,6 @@ before `apply`.
 
 **Quiz 9:** 1) There is no internet, so PyPI is unreachable; the CLI ships with Amazon Linux. 2) `html.escape` prevents cross-site scripting in the browser; `%s` placeholders prevent SQL injection in the database. 3) 303 See Other, which tells the browser to GET `/` again so the refreshed list is shown.
 
-**Quiz 10:** 1) Interface endpoints hold network cards that use the endpoint security group; AWS will not delete a security group that a network card still references.
+**Quiz 10:** 1) The username, engine, version, db_name and storage size; they are baked into the snapshot. 2) The password; the module sets it to a new random one. 3) `most_recent = true` on the `aws_db_snapshot` data source. 4) `random_password` and the `hashicorp/random` provider; run `terraform init` so it downloads.
+
+**Quiz 11:** 1) Interface endpoints hold network cards that use the endpoint security group; AWS will not delete a security group that a network card still references.

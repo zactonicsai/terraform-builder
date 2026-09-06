@@ -42,7 +42,13 @@ done
 for SG in $(aws rds describe-db-subnet-groups --query "DBSubnetGroups[?contains(DBSubnetGroupName, '$P')].DBSubnetGroupName" --output text); do
   aws rds delete-db-subnet-group --db-subnet-group-name "$SG"
 done
-aws secretsmanager delete-secret --secret-id "$P/db-credentials" --force-delete-without-recovery 2>/dev/null || true
+for S in $(aws secretsmanager list-secrets --query "SecretList[?starts_with(Name, '$P/')].ARN" --output text); do
+  aws secretsmanager delete-secret --secret-id "$S" --force-delete-without-recovery
+done
+# Manual snapshots are NOT removed by terraform destroy; they cost storage, so remove them too
+for SNAP in $(aws rds describe-db-snapshots --snapshot-type manual --query "DBSnapshots[?contains(DBInstanceIdentifier, '$P')].DBSnapshotIdentifier" --output text); do
+  aws rds delete-db-snapshot --db-snapshot-identifier "$SNAP"
+done
 
 echo "##### STACK 1: network #####"
 VPC=$(aws ec2 describe-vpcs --filters "Name=tag:Project,Values=$P" --query 'Vpcs[0].VpcId' --output text)

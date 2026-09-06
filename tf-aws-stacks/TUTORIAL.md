@@ -19,9 +19,10 @@
 11. [Line-by-Line: Stack 3, Compute](#11-line-by-line-stack-3-compute)
 12. [Line-by-Line: The Website Script](#12-line-by-line-the-website-script)
 13. [Optional Stack 4: Restore a Database from a Snapshot](#13-optional-stack-4-restore-a-database-from-a-snapshot)
-14. [Backup AWS CLI Commands](#14-backup-aws-cli-commands)
-15. [Best Practices, Pros and Cons](#15-best-practices-pros-and-cons)
-16. [Quiz Answer Key](#16-quiz-answer-key)
+14. [Optional Stacks 5 and 6: Keycloak + NiFi with OIDC Login](#14-optional-stacks-5-and-6-keycloak--nifi-with-oidc-login)
+15. [Backup AWS CLI Commands](#15-backup-aws-cli-commands)
+16. [Best Practices, Pros and Cons](#16-best-practices-pros-and-cons)
+17. [Quiz Answer Key](#17-quiz-answer-key)
 
 ---
 
@@ -302,6 +303,8 @@ tf-aws-stacks/
 │   ├── vpc/                    # VPC, subnets, route table, endpoints
 │   ├── rds/                    # secret, app SG, db SG, subnet group, PostgreSQL
 │   ├── rds_from_snapshot/      # restore a DB from a snapshot, new random password in Secrets Manager
+│   ├── keycloak_launch_template/ # Keycloak LT: IAM, SG, secret, realm import, user data
+│   ├── nifi_launch_template/   # NiFi LT: IAM, SG, self-signed cert, OIDC properties
 │   ├── launch_template/        # IAM role, launch template, user_data.sh.tpl
 │   ├── asg/                    # auto scaling group
 │   └── ec2/                    # one instance from the template
@@ -313,9 +316,12 @@ tf-aws-stacks/
 │   ├── versions.tf  variables.tf  data.tf  main.tf  outputs.tf  terraform.tfvars
 │   └── custom_user_data.sh.tpl # example first-boot override
 ├── 04-database-restore/        # STACK 4, optional: new DB from a snapshot + new password
+├── 05-keycloak/                # STACK 5, optional: Keycloak on existing VPC + RDS, sample realm "nifi"
+├── 06-nifi/                    # STACK 6, optional: Apache NiFi logging in through Keycloak (OIDC)
 ├── scripts/
 │   ├── aws-view.sh             # CLI: see everything
-│   └── aws-destroy.sh          # CLI: emergency teardown
+│   ├── aws-destroy.sh          # CLI: emergency teardown
+│   └── upload-artifacts.sh     # put Keycloak + NiFi tarballs in S3 (no-internet VPC)
 ├── COSTS.md                    # price of every resource
 └── TUTORIAL.md
 ```
@@ -988,7 +994,276 @@ group means the same app servers are allowed to connect to the copy.
 
 ---
 
-## 14. Backup AWS CLI Commands
+## 14. Optional Stacks 5 and 6: Keycloak + NiFi with OIDC Login
+
+### What is this?
+
+**Keycloak** is a login server. Instead of every app keeping its own list of users and passwords,
+apps send people to Keycloak to log in and Keycloak hands back a signed note ("this is
+nifiadmin@example.com, I checked"). The rules for that hand-off are called **OIDC** (OpenID
+Connect). A **realm** is one self-contained set of users, clients and settings inside Keycloak.
+
+**Apache NiFi** is a drag-and-drop tool for moving and transforming data. NiFi can be told:
+"do not keep your own passwords; trust this Keycloak realm instead."
+
+```
+   your laptop                          the private VPC
+   -----------                          ---------------
+   browser --port-forward 8080--> [Keycloak EC2] --5432--> [existing RDS]  (keycloak database)
+   browser --port-forward 8443--> [NiFi EC2] -----8080---> [Keycloak EC2]   (OIDC discovery + tokens)
+```
+
+Both stacks **only look up** existing things by the names in their `terraform.tfvars`: the VPC,
+the app subnets, the RDS instance, the RDS secret, the app security group. Change those names and
+the same code works against any environment.
+
+### Before you start: the tarballs
+
+There is no internet in the VPC, so servers cannot download Keycloak or NiFi. Run this once from
+your laptop (which has internet) to stage them in S3; the S3 gateway endpoint from Stack 1 lets the
+servers fetch them:
+
+```bash
+./scripts/upload-artifacts.sh my-artifacts-bucket 26.3.2 2.4.0
+```
+
+Then put the bucket and keys it prints into `05-keycloak/terraform.tfvars` and
+`06-nifi/terraform.tfvars`. (If your VPC *does* have internet, leave `artifact_key` empty and the
+modules download from the official sites instead.)
+
+Check the version numbers against keycloak.org/downloads and nifi.apache.org/download before
+running; they move fast.
+
+### Step 1: Stack 5, Keycloak
+
+```bash
+cd 05-keycloak
+terraform init          # aws + random providers
+terraform plan          # data lookups must find demo-vpc, demo-db, demo/db-credentials, demo-app-sg
+terraform apply         # ~2 min for Terraform; Keycloak itself needs ~3 more minutes to start
+```
+
+Wait, then open the tunnel from the output:
+
+```bash
+eval "$(terraform output -raw port_forward_command)"
+```
+
+Open **http://localhost:8080/admin/**. Log in with the admin password from the new secret:
+
+```bash
+aws secretsmanager get-secret-value --secret-id demo/keycloak-credentials --query SecretString --output text
+```
+
+In the top-left realm dropdown pick **nifi**. Under *Clients* you will see `nifi`; under *Users*
+you will see `nifiadmin`. That realm was created from a JSON file on first boot.
+
+If the console does not load after 5 minutes: log in with `aws ssm start-session --target <id>`
+and read `/var/log/keycloak-setup.log` and `journalctl -u keycloak -n 100`.
+
+### Step 2: Stack 6, NiFi
+
+```bash
+cd ../06-nifi
+terraform init
+terraform apply         # NiFi needs ~3 to 4 minutes after apply to start
+```
+
+Keep the Keycloak tunnel open, and in a **second** terminal open the NiFi tunnel:
+
+```bash
+eval "$(terraform output -raw port_forward_command)"
+```
+
+Open **https://localhost:8443/nifi**. Accept the self-signed certificate warning. NiFi redirects
+you to Keycloak (http://localhost:8080, through your other tunnel). Log in as `nifiadmin` with the
+`nifi_user_password` from the secret. Keycloak sends you back to NiFi, logged in as
+`nifiadmin@example.com` with full admin rights.
+
+That round trip is OIDC working end to end.
+
+### Step 3: Tear down
+
+```bash
+(cd 06-nifi     && terraform destroy)
+(cd 05-keycloak && terraform destroy)
+```
+
+The `keycloak` database Keycloak created inside RDS stays; drop it with
+`psql ... -c 'DROP DATABASE keycloak'` if you want it gone.
+
+### Line-by-line: the Keycloak module
+
+`modules/keycloak_launch_template/main.tf`
+
+```hcl
+resource "random_password" "admin"              { length = 20 special = false }
+resource "random_password" "nifi_client_secret" { length = 32 special = false }
+resource "random_password" "nifi_user"          { length = 16 special = false }
+```
+Three passwords, invented once and saved in state: the Keycloak admin, the OIDC client secret
+NiFi will use, and the test user's password.
+
+```hcl
+resource "aws_secretsmanager_secret_version" "keycloak" {
+  secret_string = jsonencode({
+    admin_username = ..., admin_password = ...,
+    realm = "nifi", nifi_client_id = "nifi", nifi_client_secret = ...,
+    nifi_user = "nifiadmin", nifi_user_password = ..., nifi_user_email = "nifiadmin@example.com",
+    public_url = "http://localhost:8080"
+  })
+}
+```
+One secret holds everything. The Keycloak server reads it to configure itself; the NiFi server
+reads it to get the client secret and the admin email; you read it to log in.
+
+```hcl
+vpc_security_group_ids = concat([aws_security_group.keycloak.id], var.extra_security_group_ids)
+```
+Keycloak wears two bouncers: its own (port 8080 from the VPC) **and** the existing `demo-app-sg`.
+Because the RDS security group already trusts `demo-app-sg`, Keycloak can reach PostgreSQL with
+no change to the database stack.
+
+```hcl
+Statement = concat(
+  [{ Action = ["secretsmanager:GetSecretValue"], Resource = [var.db_secret_arn, aws_secretsmanager_secret.keycloak.arn] }],
+  var.artifact_bucket != "" ? [{ Action = ["s3:GetObject"], Resource = "arn:aws:s3:::${var.artifact_bucket}/*" }] : []
+)
+```
+IAM permissions: read the two secrets, and, only if a bucket was given, read from it.
+`concat` with a conditional empty list is the Terraform way to add an optional statement.
+
+`modules/keycloak_launch_template/user_data.sh.tpl`
+
+```bash
+dnf install -y java-21-amazon-corretto-headless
+dnf install -y postgresql17 || dnf install -y postgresql16
+```
+Keycloak 26 needs Java 21. `psql` is used once, to create the database.
+
+```bash
+if [ -n "${artifact_key}" ]; then aws s3 cp "s3://${artifact_bucket}/${artifact_key}" /tmp/keycloak.tar.gz
+else curl -fsSL -o /tmp/keycloak.tar.gz "${download_url}"; fi
+```
+S3 if a key was given, else a direct download.
+
+```bash
+EXISTS=$(psql ... -tAc "SELECT 1 FROM pg_database WHERE datname='keycloak'")
+if [ "$EXISTS" != "1" ]; then psql ... -c "CREATE DATABASE keycloak"; fi
+```
+Keycloak wants its own database inside the RDS instance. Create it only if missing, so a rebuilt
+server reuses the existing one and keeps its data.
+
+```bash
+cat > /opt/keycloak/data/import/nifi-realm.json <<JSON
+{ "realm": "nifi", "enabled": true,
+  "clients": [ { "clientId": "nifi", "secret": "$NIFI_SECRET",
+                 "standardFlowEnabled": true, "redirectUris": ["https://localhost:8443/*", ...] } ],
+  "users":   [ { "username": "nifiadmin", "email": "nifiadmin@example.com", "emailVerified": true,
+                 "credentials": [ { "type": "password", "value": "$NIFI_PASS" } ] } ] }
+JSON
+```
+The sample realm as a file. `standardFlowEnabled` is the browser-redirect flow NiFi uses.
+`redirectUris` is the list of places Keycloak is allowed to send the user back to; NiFi's callback
+is `https://localhost:8443/nifi-api/access/oidc/callback`, covered by the wildcard.
+`emailVerified` matters because NiFi identifies people by email.
+
+```bash
+KC_DB=postgres
+KC_DB_URL=jdbc:postgresql://<rds>:5432/keycloak
+KC_BOOTSTRAP_ADMIN_USERNAME=admin
+KC_BOOTSTRAP_ADMIN_PASSWORD=...
+KC_HTTP_ENABLED=true
+KC_HOSTNAME=http://localhost:8080
+KC_HOSTNAME_STRICT=false
+KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true
+```
+Keycloak's settings. The last three solve the "two audiences" problem: your **browser** reaches
+Keycloak as `localhost:8080` (through the tunnel) while **NiFi's server** reaches it as
+`10.0.x.x:8080`. `KC_HOSTNAME` fixes the browser-facing URL and the token issuer;
+`BACKCHANNEL_DYNAMIC` lets server-to-server endpoints (token, JWKS) use whatever host was called.
+Plain HTTP is fine here only because nothing leaves the VPC; use HTTPS and a real hostname
+anywhere else.
+
+```bash
+ExecStart=/opt/keycloak/bin/kc.sh start --import-realm
+```
+Start in production mode and import any realm files found in `data/import`. Realms that already
+exist are skipped, so restarts are safe.
+
+### Line-by-line: the NiFi module
+
+`modules/nifi_launch_template/user_data.sh.tpl`
+
+```bash
+keytool -genkeypair -alias nifi ... -keystore $CONF/keystore.p12 -ext "SAN=dns:localhost,ip:$PRIVATE_IP"
+```
+NiFi refuses to do OIDC over plain HTTP, so it makes itself a self-signed certificate valid for
+`localhost` (your tunnel) and its private IP.
+
+```bash
+setp nifi.web.https.host 0.0.0.0
+setp nifi.web.https.port 8443
+setp nifi.web.proxy.host "localhost:8443,$PRIVATE_IP:8443"
+```
+Listen on all interfaces. `proxy.host` is NiFi's list of host names it accepts in the browser's
+address bar; `localhost:8443` is what you use through the tunnel.
+
+```bash
+setp nifi.security.user.login.identity.provider ""
+setp nifi.security.user.authorizer managed-authorizer
+```
+Turn **off** NiFi 2's default single-user login and turn **on** the file-based authorizer that
+works with external identity.
+
+```bash
+setp nifi.security.user.oidc.discovery.url "http://<keycloak-ip>:8080/realms/nifi/.well-known/openid-configuration"
+setp nifi.security.user.oidc.client.id     "nifi"
+setp nifi.security.user.oidc.client.secret "$CLIENT_SECRET"
+setp nifi.security.user.oidc.claim.identifying.user email
+setp nifi.security.user.oidc.additional.scopes email
+```
+The five OIDC lines. The discovery URL is where NiFi learns Keycloak's endpoints and public keys.
+`claim.identifying.user = email` means the logged-in NiFi identity is the email address.
+
+```bash
+sed -i 's|<property name="Initial User Identity 1"></property>|...>nifiadmin@example.com<...|' authorizers.xml
+sed -i 's|<property name="Initial Admin Identity"></property>|...>nifiadmin@example.com<...|'  authorizers.xml
+```
+Tell the authorizer that `nifiadmin@example.com` exists and is the first admin. This must match
+exactly the identity OIDC produces, which is why both sides read the same secret.
+
+```bash
+/opt/nifi/bin/nifi.sh set-sensitive-properties-key "..."
+```
+NiFi encrypts sensitive processor properties with this key; it must be set before first start.
+
+### `06-nifi/data.tf`: finding Keycloak
+
+```hcl
+data "aws_instance" "keycloak" {
+  count = var.keycloak_private_ip == "" ? 1 : 0
+  filter { name = "tag:Name",            values = ["demo-keycloak"] }
+  filter { name = "instance-state-name", values = ["running"] }
+}
+locals {
+  keycloak_ip = var.keycloak_private_ip != "" ? var.keycloak_private_ip : data.aws_instance.keycloak[0].private_ip
+}
+```
+Look up the running Keycloak server by its Name tag, unless tfvars gives an IP or hostname
+directly (for a Keycloak that lives somewhere else).
+
+### Quiz 11
+
+1. Why do the tarballs go through S3 instead of a direct download?
+2. Which Keycloak setting lets the browser use `localhost:8080` while NiFi's server uses the private IP?
+3. Which claim does NiFi use to name the user, and where else must that exact value appear?
+4. How does the `nifi` realm get created without anyone clicking in the admin console?
+5. Why does Keycloak not need any change to the RDS security group?
+
+---
+
+## 15. Backup AWS CLI Commands
 
 Terraform is the normal way to view and destroy. If a state file is lost, these still work
 because they search by the `Project` tag or by name.
@@ -1028,15 +1303,15 @@ aws rds delete-db-instance --db-instance-identifier demo-db-restored --skip-fina
 aws secretsmanager delete-secret --secret-id demo/demo-db-restored-credentials --force-delete-without-recovery
 ```
 
-**Prefer `terraform destroy` in 04 (if used), 03, then 02, then 01.**
+**Prefer `terraform destroy` in 06, 05, 04 (those you used), then 03, 02, 01.**
 
-### Quiz 11
+### Quiz 12
 
 1. Why must VPC endpoints be deleted before the security groups?
 
 ---
 
-## 15. Best Practices, Pros and Cons
+## 16. Best Practices, Pros and Cons
 
 | Choice | Pro | Con | When to change |
 |---|---|---|---|
@@ -1050,6 +1325,9 @@ aws secretsmanager delete-secret --secret-id demo/demo-db-restored-credentials -
 | **App SG lives in the DB stack** | DB SG can reference it, no cycle | Slightly surprising location | Or make a tiny "shared security groups" stack between 1 and 2 |
 | `skip_final_snapshot = true` | Clean destroy | Data gone | `false` + `final_snapshot_identifier` for real data |
 | Local state files | Zero setup | Easy to lose | S3 backend with locking |
+| Keycloak over plain HTTP, self-signed NiFi cert | Zero certificate setup | Only acceptable inside a sealed VPC | Real hostname + ACM/Let's Encrypt, `KC_HOSTNAME=https://...`, HTTPS-only |
+| Wildcard `https://*:8443/*` redirect URI | Works for any NiFi host | Looser than ideal | List exact NiFi callback URLs |
+| Keycloak shares the RDS master user | No extra DB setup | Keycloak can see other databases | Create a dedicated `keycloak` role with rights on its DB only |
 
 General habits used here: modules, defaults in `variables.tf` with overrides in `terraform.tfvars`,
 version pins, `default_tags`, no hard-coded IDs, `terraform fmt` + `validate`, always `plan`
@@ -1057,7 +1335,7 @@ before `apply`.
 
 ---
 
-## 16. Quiz Answer Key
+## 17. Quiz Answer Key
 
 **Quiz 1:** 1) Apply 01 → 02 → 03; destroy 03 → 02 → 01. 2) `data` blocks look up the VPC by its `Name` tag and subnets by their `Tier` tag.
 
@@ -1079,4 +1357,6 @@ before `apply`.
 
 **Quiz 10:** 1) The username, engine, version, db_name and storage size; they are baked into the snapshot. 2) The password; the module sets it to a new random one. 3) `most_recent = true` on the `aws_db_snapshot` data source. 4) `random_password` and the `hashicorp/random` provider; run `terraform init` so it downloads.
 
-**Quiz 11:** 1) Interface endpoints hold network cards that use the endpoint security group; AWS will not delete a security group that a network card still references.
+**Quiz 11:** 1) There is no internet in the VPC; the S3 gateway endpoint is the only way to fetch a file, so the tarballs are staged in a bucket. 2) `KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true`: browser-facing URLs use `public_url` (localhost via port-forward) while server-to-server URLs use whatever host NiFi called (the private IP). 3) The `email` claim; the same value is written as NiFi's Initial Admin Identity. 4) `--import-realm` with the JSON file in `data/import`. 5) Because Keycloak wears the existing `demo-app-sg`, which the RDS security group already trusts.
+
+**Quiz 12:** 1) Interface endpoints hold network cards that use the endpoint security group; AWS will not delete a security group that a network card still references.

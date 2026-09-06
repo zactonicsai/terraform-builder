@@ -1,4 +1,5 @@
-# One standalone server built from the launch template
+# One standalone server built from the launch template.
+# The Name tag is exactly var.name so other stacks can look it up.
 resource "aws_instance" "this" {
   subnet_id = var.subnet_id
 
@@ -7,5 +8,5 @@ resource "aws_instance" "this" {
     version = "$Latest"
   }
 
-  tags = { Name = "${var.name}-app" }
+  tags = { Name = var.name }
 }

@@ -24,7 +24,7 @@ for PROF in $(aws iam list-instance-profiles --query "InstanceProfiles[?contains
   done
   aws iam delete-instance-profile --instance-profile-name "$PROF"
 done
-for ROLE in $(aws iam list-roles --query "Roles[?contains(RoleName, '$P-app')].RoleName" --output text); do
+for ROLE in $(aws iam list-roles --query "Roles[?contains(RoleName, '$P-app') || contains(RoleName, '$P-keycloak') || contains(RoleName, '$P-nifi')].RoleName" --output text); do
   for POL in $(aws iam list-role-policies --role-name "$ROLE" --query 'PolicyNames' --output text); do
     aws iam delete-role-policy --role-name "$ROLE" --policy-name "$POL"
   done

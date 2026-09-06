@@ -31,7 +31,7 @@ module "asg" {
 module "ec2" {
   source = "../modules/ec2"
 
-  name               = var.project_name
+  name               = "${var.project_name}-app"
   subnet_id          = data.aws_subnets.app.ids[0]
   launch_template_id = module.launch_template.launch_template_id
 }

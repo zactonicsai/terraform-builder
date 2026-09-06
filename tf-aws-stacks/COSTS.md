@@ -94,6 +94,42 @@ are the biggest line item below.
 
 ---
 
+## Optional Stack 5: `05-keycloak`
+
+| Resource | Terraform type | Count | Unit price | Monthly |
+|---|---|---|---|---|
+| Three random passwords | `random_password` | 3 | free | $0.00 |
+| Secret | `aws_secretsmanager_secret` | 1 | $0.40 / secret-month | $0.40 |
+| Security group, IAM role/policy/profile, launch template | various | 6 | free | $0.00 |
+| Keycloak EC2, t3.small (2 GB RAM; Keycloak needs more than a micro) | `aws_instance` | 1 | $0.0208 / hour | $15.18 |
+| Root disk, 8 GB gp3 | (same) | 1 | $0.08 / GB-month | $0.64 |
+| Extra RDS storage for the `keycloak` database | none (inside existing RDS) | ~50 MB | within the 20 GB | $0.00 |
+| **Stack 5 total** | | | | **≈ $16.22** |
+
+## Optional Stack 6: `06-nifi`
+
+| Resource | Terraform type | Count | Unit price | Monthly |
+|---|---|---|---|---|
+| Two random passwords | `random_password` | 2 | free | $0.00 |
+| Security group, IAM role/policy/profile, launch template | various | 6 | free | $0.00 |
+| NiFi EC2, t3.medium (4 GB RAM; NiFi 2 wants at least 2 GB heap) | `aws_instance` | 1 | $0.0416 / hour | $30.37 |
+| Root disk, 8 GB gp3 | (same) | 1 | $0.08 / GB-month | $0.64 |
+| **Stack 6 total** | | | | **≈ $31.01** |
+
+## One-time: artifact bucket (`scripts/upload-artifacts.sh`)
+
+| Item | Unit price | Monthly |
+|---|---|---|
+| S3 storage, ~0.6 GB (Keycloak ~0.2 GB + NiFi ~0.4 GB) | $0.023 / GB-month | ~$0.01 |
+| S3 GET through the gateway endpoint | $0.0004 / 1,000 requests | ~$0.00 |
+| Data from S3 to EC2 in the same region via gateway endpoint | free | $0.00 |
+
+> Neither t3.small nor t3.medium is Free-Tier eligible; these two stacks are the priciest
+> compute in the project. Stop the instances (`aws ec2 stop-instances`) between sessions to pay
+> only for disks.
+
+---
+
 ## Grand Total
 
 | | Monthly | Hourly (useful for short practice sessions) |
@@ -103,6 +139,9 @@ are the biggest line item below.
 | Stack 3 compute | $16.46 | $0.023 |
 | **All three, no Free Tier** | **≈ $90.70** | **≈ $0.125** |
 | Optional Stack 4 restore, while it exists | +$15.94 | +$0.022 |
+| Optional Stack 5 Keycloak | +$16.22 | +$0.022 |
+| Optional Stack 6 NiFi | +$31.01 | +$0.042 |
+| **Everything (1-6), no Free Tier** | **≈ $153.90** | **≈ $0.211** |
 | **All three, classic Free Tier** | **≈ $59.50** | **≈ $0.082** |
 | Network with only the `secretsmanager` endpoint, Free Tier | ≈ $15.60 | ≈ $0.021 |
 
